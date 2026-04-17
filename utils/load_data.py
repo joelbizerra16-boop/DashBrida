@@ -369,6 +369,15 @@ TYPE_WIDGET_KEY = "filtros.tipos"
 PRODUCT_WIDGET_KEY = "filtros.produtos"
 
 
+def init_session_state() -> None:
+    if FILTERS_STATE_KEY not in st.session_state:
+        st.session_state[FILTERS_STATE_KEY] = {
+            "periodo": None,
+            "tipos": [],
+            "produtos": [],
+        }
+
+
 def get_default_period(df: pd.DataFrame) -> tuple[date, date] | None:
     if df.empty or "Data" not in df.columns:
         return None
@@ -413,14 +422,8 @@ def build_period_bounds(value, default_period: tuple[date, date] | None) -> tupl
 
 
 def init_filtros(df: pd.DataFrame) -> None:
+    init_session_state()
     default_period = get_default_period(df)
-
-    if FILTERS_STATE_KEY not in st.session_state:
-        st.session_state[FILTERS_STATE_KEY] = {
-            "periodo": default_period,
-            "tipos": [],
-            "produtos": [],
-        }
 
     filtros = st.session_state[FILTERS_STATE_KEY]
     filtros.setdefault("periodo", default_period)
@@ -453,6 +456,7 @@ def init_filtros(df: pd.DataFrame) -> None:
 
 
 def sync_period_filter() -> None:
+    init_session_state()
     filtros = st.session_state[FILTERS_STATE_KEY]
     filtros["periodo"] = normalize_period_selection(
         st.session_state.get(PERIOD_INPUT_KEY),
@@ -461,16 +465,19 @@ def sync_period_filter() -> None:
 
 
 def sync_type_filter() -> None:
+    init_session_state()
     st.session_state[FILTERS_STATE_KEY]["tipos"] = list(st.session_state.get(TYPE_WIDGET_KEY, []))
 
 
 def sync_product_filter() -> None:
+    init_session_state()
     st.session_state[FILTERS_STATE_KEY]["produtos"] = list(
         st.session_state.get(PRODUCT_WIDGET_KEY, [])
     )
 
 
 def clear_global_filters(df: pd.DataFrame) -> None:
+    init_session_state()
     default_period = get_default_period(df)
 
     st.session_state[FILTERS_STATE_KEY] = {
@@ -486,6 +493,7 @@ def clear_global_filters(df: pd.DataFrame) -> None:
 
 
 def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
+    init_session_state()
     filtered_df = df.copy()
     if "Data" in filtered_df.columns:
         filtered_df["Data"] = pd.to_datetime(filtered_df["Data"], errors="coerce")
@@ -516,6 +524,7 @@ def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def render_global_sidebar(df: pd.DataFrame, source_name: str, sheet_count: int) -> None:
+    init_session_state()
     apply_brand_theme()
     hide_default_sidebar_navigation()
     render_sidebar_brand()
@@ -570,6 +579,7 @@ def render_global_sidebar(df: pd.DataFrame, source_name: str, sheet_count: int) 
 
 
 def get_dashboard_context() -> tuple[pd.DataFrame, str, pd.DataFrame]:
+    init_session_state()
     source_name = initialize_database()
     df = load_sales_data()
     sheet_registry = load_sheet_registry()

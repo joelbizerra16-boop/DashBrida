@@ -11,12 +11,13 @@ from utils.formatters import (
     format_integer,
     format_ratio,
 )
-from utils.load_data import get_dashboard_context
+from utils.load_data import get_dashboard_context, init_session_state
 from utils.metrics import build_product_analysis, build_type_analysis
 from utils.theme import apply_brand_theme, render_kpi_card, render_page_header, render_section_gap, style_plotly_figure
 
 st.set_page_config(page_title="Logistica", layout="wide", initial_sidebar_state="expanded")
 guard_page_access()
+init_session_state()
 apply_brand_theme()
 render_logout_button()
 

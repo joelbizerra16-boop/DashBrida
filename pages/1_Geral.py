@@ -14,7 +14,7 @@ from utils.formatters import (
     format_integer,
     format_ratio,
 )
-from utils.load_data import get_dashboard_context
+from utils.load_data import get_dashboard_context, init_session_state
 from utils.metrics import build_daily_analysis, calculate_kpis, get_daily_highlights
 from utils.theme import (
     apply_brand_theme,
@@ -48,6 +48,7 @@ def render_single_chart_section(title: str, figure, chart_key: str, description_
 
 st.set_page_config(page_title="Geral", layout="wide", initial_sidebar_state="expanded")
 guard_page_access()
+init_session_state()
 apply_brand_theme()
 render_logout_button()
 st.markdown(

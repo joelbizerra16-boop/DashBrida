@@ -5,11 +5,12 @@ import streamlit as st
 from utils.auth import guard_page_access, render_logout_button
 from utils.chart_text import render_chart_description
 from utils.formatters import abreviar_valor, format_currency, format_integer
-from utils.load_data import get_dashboard_context
+from utils.load_data import get_dashboard_context, init_session_state
 from utils.theme import apply_brand_theme, render_page_header, render_section_gap, style_plotly_figure
 
 st.set_page_config(page_title="Inteligencia", layout="wide", initial_sidebar_state="expanded")
 guard_page_access()
+init_session_state()
 apply_brand_theme()
 render_logout_button()
 
