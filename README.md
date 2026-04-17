@@ -33,4 +33,4 @@ Arquivos que nao devem ir para o repositório:
 ## Observacoes
 
 - O banco SQLite em `data/dashboard.db` e recriado localmente a partir da planilha quando necessario.
-- A aplicacao abre direto, sem tela de login.
+- A aplicacao agora exige login antes de liberar a sidebar e a navegacao multipagina.

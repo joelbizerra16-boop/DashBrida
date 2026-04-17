@@ -19,8 +19,10 @@ def calculate_kpis(df: pd.DataFrame) -> dict[str, float]:
 
 
 def build_daily_analysis(df: pd.DataFrame) -> pd.DataFrame:
+    normalized_df = df.copy()
+    normalized_df["Data"] = pd.to_datetime(normalized_df["Data"], errors="coerce").dt.normalize()
     daily = (
-        df.groupby("Data", as_index=False)
+        normalized_df.groupby("Data", as_index=False)
         .agg(
             {
                 "ValorTotal": "sum",

@@ -1,16 +1,16 @@
 import plotly.express as px
 import streamlit as st
 
-from utils.auth import ensure_authenticated, render_logout_button
+from utils.auth import guard_page_access, render_logout_button
 from utils.chart_text import render_chart_description
-from utils.formatters import abreviar_valor, format_dataframe_ptbr
+from utils.formatters import abreviar_valor, build_category_tooltip_dataframe, format_dataframe_ptbr
 from utils.load_data import get_dashboard_context
 from utils.metrics import build_product_analysis
 from utils.theme import apply_brand_theme, render_page_header, render_section_gap, style_plotly_figure
 
 st.set_page_config(page_title="Produtos", layout="wide", initial_sidebar_state="expanded")
+guard_page_access()
 apply_brand_theme()
-ensure_authenticated()
 render_logout_button()
 
 df, _, _ = get_dashboard_context()
@@ -22,6 +22,13 @@ if df.empty:
     st.stop()
 
 product_df = build_product_analysis(df)
+top10_tooltip_df = build_category_tooltip_dataframe(
+    product_df.head(10),
+    label_column="Produto",
+    value_column="ValorTotal",
+    weight_column="PesoTotal",
+    ratio_column="R$/KG",
+)
 
 render_section_gap()
 col1, col2 = st.columns(2)
@@ -54,7 +61,8 @@ top10_chart.update_traces(
     textposition="outside",
     textfont={"size": 10},
     cliponaxis=False,
-    hovertemplate="R$ %{y:,.2f}<extra></extra>",
+    customdata=top10_tooltip_df[["Label", "Valor_fmt", "Peso_fmt", "RKG_fmt", "Participacao_fmt", "Rank", "Vs_media_fmt", "Seta"]],
+    hovertemplate="<b>📦 %{customdata[0]}</b><br><br>💰 Receita: %{customdata[1]}<br>⚖️ Peso: %{customdata[2]}<br>📊 R$/KG: %{customdata[3]}<br>🧩 Participação: %{customdata[4]}<br>🏁 Ranking: #%{customdata[5]}<br>📈 Vs. média: %{customdata[7]} %{customdata[6]}<extra></extra>",
 )
 style_plotly_figure(top10_chart, color_sequence=["#1F2A5A"], abbreviate_y_axis=True)
 st.plotly_chart(top10_chart, width="stretch", key="produtos_top10_faturamento")

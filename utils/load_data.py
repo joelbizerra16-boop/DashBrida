@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from io import BytesIO
 from pathlib import Path
 import re
@@ -324,7 +324,7 @@ def load_sales_data() -> pd.DataFrame:
     initialize_database()
     with sqlite3.connect(DB_PATH) as connection:
         df = pd.read_sql_query(f"SELECT * FROM {SALES_TABLE}", connection)
-    df["Data"] = pd.to_datetime(df["Data"], errors="coerce")
+    df["Data"] = pd.to_datetime(df["Data"], errors="coerce").dt.normalize()
     return df
 
 
@@ -363,11 +363,140 @@ def get_last_updated_at() -> str | None:
     return row[0] if row else None
 
 
+FILTERS_STATE_KEY = "filtros"
+PERIOD_INPUT_KEY = "filtros.periodo.input"
+TYPE_WIDGET_KEY = "filtros.tipos"
+PRODUCT_WIDGET_KEY = "filtros.produtos"
+
+
+def get_default_period(df: pd.DataFrame) -> tuple[date, date] | None:
+    if df.empty or "Data" not in df.columns:
+        return None
+    return (df["Data"].min().date(), df["Data"].max().date())
+
+
+def normalize_period_selection(value, default_period: tuple[date, date] | None) -> tuple[date, date] | None:
+    if default_period is None:
+        return None
+
+    if not value:
+        return default_period
+
+    if isinstance(value, (tuple, list)):
+        if len(value) >= 2:
+            start_date, end_date = value[0], value[1]
+        elif len(value) == 1:
+            start_date = end_date = value[0]
+        else:
+            return default_period
+    else:
+        start_date = end_date = value
+
+    start_date = pd.to_datetime(start_date).date()
+    end_date = pd.to_datetime(end_date).date()
+
+    if start_date > end_date:
+        start_date, end_date = end_date, start_date
+
+    return (start_date, end_date)
+
+
+def build_period_bounds(value, default_period: tuple[date, date] | None) -> tuple[pd.Timestamp, pd.Timestamp] | None:
+    selected_period = normalize_period_selection(value, default_period)
+    if selected_period is None:
+        return None
+
+    start_date, end_date = selected_period
+    data_inicio = pd.to_datetime(start_date)
+    data_fim = pd.to_datetime(end_date) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
+    return data_inicio, data_fim
+
+
+def init_filtros(df: pd.DataFrame) -> None:
+    default_period = get_default_period(df)
+
+    if FILTERS_STATE_KEY not in st.session_state:
+        st.session_state[FILTERS_STATE_KEY] = {
+            "periodo": default_period,
+            "tipos": [],
+            "produtos": [],
+        }
+
+    filtros = st.session_state[FILTERS_STATE_KEY]
+    filtros.setdefault("periodo", default_period)
+    filtros.setdefault("tipos", [])
+    filtros.setdefault("produtos", [])
+
+    available_types = sorted(df["TIPO"].dropna().unique()) if "TIPO" in df.columns else []
+    available_products = sorted(df["Produto"].dropna().unique()) if "Produto" in df.columns else []
+
+    filtros["tipos"] = [item for item in filtros["tipos"] if item in available_types]
+    filtros["produtos"] = [item for item in filtros["produtos"] if item in available_products]
+
+    if default_period is not None:
+        selected_period = normalize_period_selection(filtros.get("periodo"), default_period)
+        if selected_period is None:
+            selected_period = default_period
+
+        start_date = max(selected_period[0], default_period[0])
+        end_date = min(selected_period[1], default_period[1])
+        if start_date > end_date:
+            start_date, end_date = default_period
+        filtros["periodo"] = (start_date, end_date)
+    else:
+        filtros["periodo"] = None
+
+    st.session_state[TYPE_WIDGET_KEY] = list(filtros["tipos"])
+    st.session_state[PRODUCT_WIDGET_KEY] = list(filtros["produtos"])
+    if filtros["periodo"] is None and PERIOD_INPUT_KEY in st.session_state:
+        del st.session_state[PERIOD_INPUT_KEY]
+
+
+def sync_period_filter() -> None:
+    filtros = st.session_state[FILTERS_STATE_KEY]
+    filtros["periodo"] = normalize_period_selection(
+        st.session_state.get(PERIOD_INPUT_KEY),
+        filtros.get("periodo"),
+    )
+
+
+def sync_type_filter() -> None:
+    st.session_state[FILTERS_STATE_KEY]["tipos"] = list(st.session_state.get(TYPE_WIDGET_KEY, []))
+
+
+def sync_product_filter() -> None:
+    st.session_state[FILTERS_STATE_KEY]["produtos"] = list(
+        st.session_state.get(PRODUCT_WIDGET_KEY, [])
+    )
+
+
+def clear_global_filters(df: pd.DataFrame) -> None:
+    default_period = get_default_period(df)
+
+    st.session_state[FILTERS_STATE_KEY] = {
+        "periodo": default_period,
+        "tipos": [],
+        "produtos": [],
+    }
+
+    st.session_state[TYPE_WIDGET_KEY] = []
+    st.session_state[PRODUCT_WIDGET_KEY] = []
+    if PERIOD_INPUT_KEY in st.session_state:
+        del st.session_state[PERIOD_INPUT_KEY]
+
+
 def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
     filtered_df = df.copy()
-    selected_types = st.session_state.get("filter_tipos", [])
-    selected_products = st.session_state.get("filter_produtos", [])
-    selected_period = st.session_state.get("filter_periodo")
+    if "Data" in filtered_df.columns:
+        filtered_df["Data"] = pd.to_datetime(filtered_df["Data"], errors="coerce")
+
+    filtros = st.session_state.get(
+        FILTERS_STATE_KEY,
+        {"periodo": None, "tipos": [], "produtos": []},
+    )
+    selected_types = filtros.get("tipos", [])
+    selected_products = filtros.get("produtos", [])
+    selected_period = filtros.get("periodo")
 
     if selected_types:
         filtered_df = filtered_df[filtered_df["TIPO"].isin(selected_types)]
@@ -376,15 +505,12 @@ def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
         filtered_df = filtered_df[filtered_df["Produto"].isin(selected_products)]
 
     if selected_period:
-        if isinstance(selected_period, tuple):
-            start_date, end_date = selected_period
-        else:
-            start_date = end_date = selected_period
-        start_date = pd.to_datetime(start_date)
-        end_date = pd.to_datetime(end_date)
-        filtered_df = filtered_df[
-            filtered_df["Data"].between(start_date.normalize(), end_date.normalize())
-        ]
+        period_bounds = build_period_bounds(selected_period, get_default_period(df))
+        if period_bounds is not None:
+            data_inicio, data_fim = period_bounds
+            filtered_df = filtered_df[
+                (filtered_df["Data"] >= data_inicio) & (filtered_df["Data"] <= data_fim)
+            ]
 
     return filtered_df
 
@@ -400,36 +526,47 @@ def render_global_sidebar(df: pd.DataFrame, source_name: str, sheet_count: int) 
     st.sidebar.caption(f"Fonte de dados: {source_name}")
     st.sidebar.caption(f"Abas importadas: {sheet_count}")
 
-    date_min = df["Data"].min().date() if not df.empty else None
-    date_max = df["Data"].max().date() if not df.empty else None
+    init_filtros(df)
+    filtros = st.session_state[FILTERS_STATE_KEY]
+    default_period = get_default_period(df)
 
     st.sidebar.multiselect(
         "Tipo",
         sorted(df["TIPO"].dropna().unique()),
-        key="filter_tipos",
+        key=TYPE_WIDGET_KEY,
+        on_change=sync_type_filter,
     )
     st.sidebar.multiselect(
         "Produto",
         sorted(df["Produto"].dropna().unique()),
-        key="filter_produtos",
+        key=PRODUCT_WIDGET_KEY,
+        on_change=sync_product_filter,
     )
 
-    if date_min and date_max:
-        default_period = st.session_state.get("filter_periodo", (date_min, date_max))
+    if default_period is not None:
         st.sidebar.date_input(
             "Periodo",
-            value=default_period,
-            min_value=date_min,
-            max_value=date_max,
-            key="filter_periodo",
+            value=normalize_period_selection(filtros.get("periodo"), default_period),
+            min_value=default_period[0],
+            max_value=default_period[1],
+            key=PERIOD_INPUT_KEY,
+            on_change=sync_period_filter,
         )
 
-    if st.sidebar.button("Limpar filtros", key="clear_filters", use_container_width=True):
-        st.session_state["filter_tipos"] = []
-        st.session_state["filter_produtos"] = []
-        if date_min and date_max:
-            st.session_state["filter_periodo"] = (date_min, date_max)
-        st.rerun()
+        period_bounds = build_period_bounds(filtros.get("periodo"), default_period)
+        if period_bounds is not None:
+            data_inicio, data_fim = period_bounds
+            st.sidebar.info(
+                f"Periodo: {data_inicio.strftime('%d/%m/%Y')} ate {data_fim.strftime('%d/%m/%Y')}"
+            )
+
+    st.sidebar.button(
+        "Limpar filtros",
+        key="clear_filters",
+        use_container_width=True,
+        on_click=clear_global_filters,
+        args=(df,),
+    )
 
 
 def get_dashboard_context() -> tuple[pd.DataFrame, str, pd.DataFrame]:

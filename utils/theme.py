@@ -318,7 +318,7 @@ def render_global_update_notice(source_name: str, updated_at: str | None) -> Non
     st.markdown(
         f"""
         <div class="brida-update-notice">
-            <strong>Planilha atualizada</strong>
+            <strong>Sistema atualizado</strong>
             <span>{formatted_timestamp} | Fonte: {source_name}</span>
         </div>
         """,
