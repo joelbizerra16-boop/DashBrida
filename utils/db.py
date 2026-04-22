@@ -4,7 +4,6 @@ import os
 import re
 import time
 from typing import Any
-from urllib.parse import quote_plus
 
 import streamlit as st
 from sqlalchemy import create_engine, text
@@ -12,16 +11,6 @@ from sqlalchemy.engine import Engine
 
 IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 DEFAULT_DB_SCHEMA = "public"
-DATABASE_URL_KEYS = (
-    "DATABASE_URL",
-    "SUPABASE_DB_URL",
-    "SUPABASE_DATABASE_URL",
-)
-POSTGRESQL_SCHEME_REPLACEMENTS = (
-    ("postgresql+psycopg://", "postgresql+psycopg://"),
-    ("postgresql://", "postgresql+psycopg://"),
-    ("postgres://", "postgresql+psycopg://"),
-)
 DEFAULT_CONNECT_TIMEOUT = 5
 DEFAULT_STATEMENT_TIMEOUT_MS = 15000
 
@@ -52,40 +41,24 @@ def _get_secret_value(*keys: str) -> Any | None:
     return None
 
 
-def normalize_database_url(database_url: str) -> str:
-    normalized = str(database_url).strip()
-    for prefix, replacement in POSTGRESQL_SCHEME_REPLACEMENTS:
-        if normalized.startswith(prefix):
-            return normalized.replace(prefix, replacement, 1)
-    return normalized
-
-
 def log_database_event(message: str) -> None:
     print(f"[db] {message}")
 
 
 def build_database_url() -> str:
-    direct_url = _get_database_url_from_secrets() or _get_secret_value(*DATABASE_URL_KEYS)
-    if direct_url:
-        return normalize_database_url(str(direct_url))
+    url = None
 
-    host = _get_secret_value("SUPABASE_HOST", "POSTGRES_HOST", "DB_HOST")
-    port = _get_secret_value("SUPABASE_PORT", "POSTGRES_PORT", "DB_PORT") or "5432"
-    database = _get_secret_value("SUPABASE_DB_NAME", "POSTGRES_DB", "DB_NAME")
-    user = _get_secret_value("SUPABASE_USER", "POSTGRES_USER", "DB_USER")
-    password = _get_secret_value("SUPABASE_PASSWORD", "POSTGRES_PASSWORD", "DB_PASSWORD")
-    sslmode = _get_secret_value("SUPABASE_SSLMODE", "POSTGRES_SSLMODE", "DB_SSLMODE") or "require"
+    if "DATABASE_URL" in st.secrets:
+        url = st.secrets["DATABASE_URL"]
+    elif os.getenv("DATABASE_URL"):
+        url = os.getenv("DATABASE_URL")
 
-    if not all((host, database, user, password)):
+    if not url:
         raise RuntimeError(
-            "Configure DATABASE_URL ou as credenciais do PostgreSQL/Supabase em variaveis de ambiente ou .streamlit/secrets.toml."
+            "DATABASE_URL nao encontrado. Configure em st.secrets ou variavel de ambiente."
         )
 
-    encoded_user = quote_plus(str(user))
-    encoded_password = quote_plus(str(password))
-    return normalize_database_url(
-        f"postgresql+psycopg://{encoded_user}:{encoded_password}@{host}:{port}/{database}?sslmode={sslmode}"
-    )
+    return str(url).strip()
 
 
 def get_database_schema() -> str:
@@ -109,11 +82,13 @@ def _build_connect_args() -> dict[str, Any]:
 def get_engine() -> Engine:
     database_url = build_database_url()
     log_database_event(f"creating engine for {database_url.split('@')[-1]}")
+    try:
+        st.write("Usando DATABASE_URL do Streamlit Secrets/Environment:", database_url.split("@")[-1])
+    except Exception:
+        pass
     return create_engine(
         database_url,
         pool_pre_ping=True,
-        pool_recycle=300,
-        pool_timeout=10,
         connect_args=_build_connect_args(),
         future=True,
     )
