@@ -4,16 +4,17 @@ from datetime import date, datetime
 from io import BytesIO
 from pathlib import Path
 import re
-import sqlite3
 
 import pandas as pd
 import streamlit as st
+from sqlalchemy import inspect, text
+from sqlalchemy.engine import Connection
 
+from utils.db import get_engine, get_database_schema, qualify_table_name
 from utils.theme import apply_brand_theme, render_sidebar_brand
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT_DIR / "data"
-DB_PATH = DATA_DIR / "dashboard.db"
 SOURCE_PATH = DATA_DIR / "base.xlsx"
 SOURCE_SHEET = "ANUAL"
 SALES_TABLE = "sales"
@@ -37,23 +38,27 @@ def ensure_data_directory() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def create_metadata_tables(connection: sqlite3.Connection) -> None:
+def create_metadata_tables(connection: Connection) -> None:
     connection.execute(
-        f"""
-        CREATE TABLE IF NOT EXISTS {METADATA_TABLE} (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
+        text(
+            f"""
+            CREATE TABLE IF NOT EXISTS {qualify_table_name(METADATA_TABLE)} (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+            """
         )
-        """
     )
     connection.execute(
-        f"""
-        CREATE TABLE IF NOT EXISTS {SHEET_REGISTRY_TABLE} (
-            sheet_name TEXT PRIMARY KEY,
-            table_name TEXT NOT NULL,
-            row_count INTEGER NOT NULL
+        text(
+            f"""
+            CREATE TABLE IF NOT EXISTS {qualify_table_name(SHEET_REGISTRY_TABLE)} (
+                sheet_name TEXT PRIMARY KEY,
+                table_name TEXT NOT NULL,
+                row_count INTEGER NOT NULL
+            )
+            """
         )
-        """
     )
 
 
@@ -154,51 +159,101 @@ def replace_database_contents(source_file: Path, source_name: str, source_token:
 
     updated_at = datetime.now().isoformat(timespec="seconds")
 
-    with sqlite3.connect(DB_PATH) as connection:
-        create_metadata_tables(connection)
-        existing_tables = connection.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
-        ).fetchall()
-        preserved_tables = {METADATA_TABLE, SHEET_REGISTRY_TABLE}
-        for (table_name,) in existing_tables:
-            if table_name not in preserved_tables:
-                connection.execute(f'DROP TABLE IF EXISTS "{table_name}"')
+    engine = get_engine()
+    schema = get_database_schema()
 
-        connection.execute(f"DELETE FROM {SHEET_REGISTRY_TABLE}")
+    with engine.begin() as connection:
+        create_metadata_tables(connection)
+        existing_tables = inspect(connection).get_table_names(schema=schema)
+        preserved_tables = {METADATA_TABLE, SHEET_REGISTRY_TABLE}
+        for table_name in existing_tables:
+            if table_name not in preserved_tables:
+                connection.execute(text(f"DROP TABLE IF EXISTS {qualify_table_name(table_name, schema)}"))
+
+        connection.execute(text(f"DELETE FROM {qualify_table_name(SHEET_REGISTRY_TABLE, schema)}"))
 
         used_names = {METADATA_TABLE, SHEET_REGISTRY_TABLE, SALES_TABLE}
         for sheet_name in workbook.sheet_names:
             sheet_df = workbook.parse(sheet_name=sheet_name)
             if sheet_name == SOURCE_SHEET:
                 normalized_df = normalize_sales_dataframe(sheet_df)
-                normalized_df.to_sql(SALES_TABLE, connection, if_exists="replace", index=False)
+                normalized_df.to_sql(
+                    SALES_TABLE,
+                    connection,
+                    schema=schema,
+                    if_exists="replace",
+                    index=False,
+                    method="multi",
+                    chunksize=1000,
+                )
                 connection.execute(
-                    f"INSERT OR REPLACE INTO {SHEET_REGISTRY_TABLE}(sheet_name, table_name, row_count) VALUES(?, ?, ?)",
-                    (sheet_name, SALES_TABLE, len(normalized_df)),
+                    text(
+                        f"""
+                        INSERT INTO {qualify_table_name(SHEET_REGISTRY_TABLE, schema)}(sheet_name, table_name, row_count)
+                        VALUES(:sheet_name, :table_name, :row_count)
+                        ON CONFLICT (sheet_name) DO UPDATE
+                        SET table_name = EXCLUDED.table_name,
+                            row_count = EXCLUDED.row_count
+                        """
+                    ),
+                    {"sheet_name": sheet_name, "table_name": SALES_TABLE, "row_count": len(normalized_df)},
                 )
                 continue
 
             normalized_df = normalize_generic_dataframe(sheet_df)
             table_name = sanitize_table_name(sheet_name, used_names)
-            normalized_df.to_sql(table_name, connection, if_exists="replace", index=False)
+            normalized_df.to_sql(
+                table_name,
+                connection,
+                schema=schema,
+                if_exists="replace",
+                index=False,
+                method="multi",
+                chunksize=1000,
+            )
             connection.execute(
-                f"INSERT OR REPLACE INTO {SHEET_REGISTRY_TABLE}(sheet_name, table_name, row_count) VALUES(?, ?, ?)",
-                (sheet_name, table_name, len(normalized_df)),
+                text(
+                    f"""
+                    INSERT INTO {qualify_table_name(SHEET_REGISTRY_TABLE, schema)}(sheet_name, table_name, row_count)
+                    VALUES(:sheet_name, :table_name, :row_count)
+                    ON CONFLICT (sheet_name) DO UPDATE
+                    SET table_name = EXCLUDED.table_name,
+                        row_count = EXCLUDED.row_count
+                    """
+                ),
+                {"sheet_name": sheet_name, "table_name": table_name, "row_count": len(normalized_df)},
             )
 
         connection.execute(
-            f"INSERT OR REPLACE INTO {METADATA_TABLE}(key, value) VALUES(?, ?)",
-            ("source_token", source_token),
+            text(
+                f"""
+                INSERT INTO {qualify_table_name(METADATA_TABLE, schema)}(key, value)
+                VALUES(:key, :value)
+                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+                """
+            ),
+            {"key": "source_token", "value": source_token},
         )
         connection.execute(
-            f"INSERT OR REPLACE INTO {METADATA_TABLE}(key, value) VALUES(?, ?)",
-            ("source_name", source_name),
+            text(
+                f"""
+                INSERT INTO {qualify_table_name(METADATA_TABLE, schema)}(key, value)
+                VALUES(:key, :value)
+                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+                """
+            ),
+            {"key": "source_name", "value": source_name},
         )
         connection.execute(
-            f"INSERT OR REPLACE INTO {METADATA_TABLE}(key, value) VALUES(?, ?)",
-            (LAST_UPDATED_AT_KEY, updated_at),
+            text(
+                f"""
+                INSERT INTO {qualify_table_name(METADATA_TABLE, schema)}(key, value)
+                VALUES(:key, :value)
+                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+                """
+            ),
+            {"key": LAST_UPDATED_AT_KEY, "value": updated_at},
         )
-        connection.commit()
 
 
 def save_uploaded_source(uploaded_file) -> Path:
@@ -214,22 +269,28 @@ def clear_data_caches() -> None:
     load_sheet_preview.clear()
 
 
-def ensure_last_updated_metadata(connection: sqlite3.Connection, source_file: Path) -> None:
+def ensure_last_updated_metadata(connection: Connection, fallback_updated_at: str | None = None) -> None:
+    schema = get_database_schema()
     stored_updated_at = connection.execute(
-        f"SELECT value FROM {METADATA_TABLE} WHERE key = ?",
-        (LAST_UPDATED_AT_KEY,),
+        text(
+            f"SELECT value FROM {qualify_table_name(METADATA_TABLE, schema)} WHERE key = :key"
+        ),
+        {"key": LAST_UPDATED_AT_KEY},
     ).fetchone()
     if stored_updated_at is not None:
         return
 
-    fallback_updated_at = datetime.fromtimestamp(source_file.stat().st_mtime).isoformat(
-        timespec="seconds"
-    )
+    effective_updated_at = fallback_updated_at or datetime.now().isoformat(timespec="seconds")
     connection.execute(
-        f"INSERT OR REPLACE INTO {METADATA_TABLE}(key, value) VALUES(?, ?)",
-        (LAST_UPDATED_AT_KEY, fallback_updated_at),
+        text(
+            f"""
+            INSERT INTO {qualify_table_name(METADATA_TABLE, schema)}(key, value)
+            VALUES(:key, :value)
+            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+            """
+        ),
+        {"key": LAST_UPDATED_AT_KEY, "value": effective_updated_at},
     )
-    connection.commit()
 
 
 def hide_default_sidebar_navigation() -> None:
@@ -294,36 +355,44 @@ def handle_workbook_upload() -> None:
 
 @st.cache_resource
 def initialize_database() -> str:
-    source_file = bootstrap_source_file()
-    source_token = str(source_file.stat().st_mtime_ns)
+    engine = get_engine()
+    schema = get_database_schema()
 
-    with sqlite3.connect(DB_PATH) as connection:
+    with engine.begin() as connection:
         create_metadata_tables(connection)
-        stored_token = connection.execute(
-            f"SELECT value FROM {METADATA_TABLE} WHERE key = 'source_token'"
-        ).fetchone()
-        sales_table_exists = connection.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
-            (SALES_TABLE,),
-        ).fetchone()
-
-        if stored_token is None or stored_token[0] != source_token or sales_table_exists is None:
+        sales_table_exists = inspect(connection).has_table(SALES_TABLE, schema=schema)
+        source_file = None
+        if not sales_table_exists:
+            source_file = bootstrap_source_file()
+            source_token = str(source_file.stat().st_mtime_ns)
             replace_database_contents(source_file, source_file.name, source_token)
+            fallback_updated_at = datetime.fromtimestamp(source_file.stat().st_mtime).isoformat(
+                timespec="seconds"
+            )
+        else:
+            fallback_updated_at = None
 
-        ensure_last_updated_metadata(connection, source_file)
+        ensure_last_updated_metadata(connection, fallback_updated_at)
 
         stored_name = connection.execute(
-            f"SELECT value FROM {METADATA_TABLE} WHERE key = 'source_name'"
+            text(f"SELECT value FROM {qualify_table_name(METADATA_TABLE, schema)} WHERE key = :key"),
+            {"key": "source_name"},
         ).fetchone()
 
-    return stored_name[0] if stored_name else source_file.name
+    if stored_name:
+        return stored_name[0]
+    if source_file is not None:
+        return source_file.name
+    return "Banco remoto"
 
 
 @st.cache_data
 def load_sales_data() -> pd.DataFrame:
     initialize_database()
-    with sqlite3.connect(DB_PATH) as connection:
-        df = pd.read_sql_query(f"SELECT * FROM {SALES_TABLE}", connection)
+    engine = get_engine()
+    schema = get_database_schema()
+    with engine.connect() as connection:
+        df = pd.read_sql_query(text(f"SELECT * FROM {qualify_table_name(SALES_TABLE, schema)}"), connection)
     df["Data"] = pd.to_datetime(df["Data"], errors="coerce").dt.normalize()
     return df
 
@@ -331,9 +400,13 @@ def load_sales_data() -> pd.DataFrame:
 @st.cache_data
 def load_sheet_registry() -> pd.DataFrame:
     initialize_database()
-    with sqlite3.connect(DB_PATH) as connection:
+    engine = get_engine()
+    schema = get_database_schema()
+    with engine.connect() as connection:
         return pd.read_sql_query(
-            f"SELECT sheet_name, table_name, row_count FROM {SHEET_REGISTRY_TABLE} ORDER BY sheet_name",
+            text(
+                f"SELECT sheet_name, table_name, row_count FROM {qualify_table_name(SHEET_REGISTRY_TABLE, schema)} ORDER BY sheet_name"
+            ),
             connection,
         )
 
@@ -346,19 +419,24 @@ def load_sheet_preview(sheet_name: str, limit: int = 200) -> pd.DataFrame:
         return pd.DataFrame()
 
     table_name = selected_sheet.iloc[0]["table_name"]
-    with sqlite3.connect(DB_PATH) as connection:
+    engine = get_engine()
+    schema = get_database_schema()
+    with engine.connect() as connection:
         return pd.read_sql_query(
-            f'SELECT * FROM "{table_name}" LIMIT {int(limit)}',
+            text(f"SELECT * FROM {qualify_table_name(table_name, schema)} LIMIT :limit"),
             connection,
+            params={"limit": int(limit)},
         )
 
 
 def get_last_updated_at() -> str | None:
     initialize_database()
-    with sqlite3.connect(DB_PATH) as connection:
+    engine = get_engine()
+    schema = get_database_schema()
+    with engine.connect() as connection:
         row = connection.execute(
-            f"SELECT value FROM {METADATA_TABLE} WHERE key = ?",
-            (LAST_UPDATED_AT_KEY,),
+            text(f"SELECT value FROM {qualify_table_name(METADATA_TABLE, schema)} WHERE key = :key"),
+            {"key": LAST_UPDATED_AT_KEY},
         ).fetchone()
     return row[0] if row else None
 

@@ -40,7 +40,7 @@ st.dataframe(
         sheet_registry.rename(
             columns={
                 "sheet_name": "Aba",
-                "table_name": "Tabela SQLite",
+                "table_name": "Tabela Banco",
                 "row_count": "Linhas",
             }
         )
