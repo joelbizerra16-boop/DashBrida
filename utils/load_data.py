@@ -10,7 +10,7 @@ import streamlit as st
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import Connection
 
-from utils.db import get_engine, get_database_schema, qualify_table_name
+from utils.db import get_engine, get_database_schema, log_database_event, qualify_table_name, test_database_connection
 from utils.theme import apply_brand_theme, render_sidebar_brand
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -153,6 +153,7 @@ def sanitize_table_name(sheet_name: str, used_names: set[str]) -> str:
 
 
 def replace_database_contents(source_file: Path, source_name: str, source_token: str) -> None:
+    log_database_event(f"replace_database_contents started for {source_name}")
     workbook = pd.ExcelFile(source_file)
     if SOURCE_SHEET not in workbook.sheet_names:
         raise ValueError(f"A planilha enviada precisa conter a aba {SOURCE_SHEET}.")
@@ -163,6 +164,7 @@ def replace_database_contents(source_file: Path, source_name: str, source_token:
     schema = get_database_schema()
 
     with engine.begin() as connection:
+        log_database_event("ensuring metadata tables")
         create_metadata_tables(connection)
         existing_tables = inspect(connection).get_table_names(schema=schema)
         preserved_tables = {METADATA_TABLE, SHEET_REGISTRY_TABLE}
@@ -174,6 +176,7 @@ def replace_database_contents(source_file: Path, source_name: str, source_token:
 
         used_names = {METADATA_TABLE, SHEET_REGISTRY_TABLE, SALES_TABLE}
         for sheet_name in workbook.sheet_names:
+            log_database_event(f"loading sheet {sheet_name}")
             sheet_df = workbook.parse(sheet_name=sheet_name)
             if sheet_name == SOURCE_SHEET:
                 normalized_df = normalize_sales_dataframe(sheet_df)
@@ -254,6 +257,7 @@ def replace_database_contents(source_file: Path, source_name: str, source_token:
             ),
             {"key": LAST_UPDATED_AT_KEY, "value": updated_at},
         )
+    log_database_event("replace_database_contents finished")
 
 
 def save_uploaded_source(uploaded_file) -> Path:
@@ -263,10 +267,13 @@ def save_uploaded_source(uploaded_file) -> Path:
 
 
 def clear_data_caches() -> None:
-    initialize_database.clear()
     load_sales_data.clear()
     load_sheet_registry.clear()
     load_sheet_preview.clear()
+    st.session_state.pop(DB_INIT_STATE_KEY, None)
+    st.session_state.pop(DB_INIT_SOURCE_NAME_KEY, None)
+    st.session_state.pop(DB_INIT_ERROR_KEY, None)
+    st.session_state.pop(DB_INIT_LOGS_KEY, None)
 
 
 def ensure_last_updated_metadata(connection: Connection, fallback_updated_at: str | None = None) -> None:
@@ -353,16 +360,33 @@ def handle_workbook_upload() -> None:
         st.sidebar.success(status_message)
 
 
-@st.cache_resource
 def initialize_database() -> str:
-    engine = get_engine()
-    schema = get_database_schema()
+    init_state = st.session_state.get(DB_INIT_STATE_KEY)
+    if init_state == "ready":
+        return st.session_state.get(DB_INIT_SOURCE_NAME_KEY, "Banco remoto")
+    if init_state == "running":
+        raise RuntimeError("Inicializacao do banco ja esta em andamento. Aguarde alguns segundos.")
 
-    with engine.begin() as connection:
-        create_metadata_tables(connection)
-        sales_table_exists = inspect(connection).has_table(SALES_TABLE, schema=schema)
-        source_file = None
+    source_file = None
+
+    try:
+        st.session_state[DB_INIT_STATE_KEY] = "running"
+        st.session_state.pop(DB_INIT_ERROR_KEY, None)
+        emit_init_log("initialize_database started")
+        engine = get_engine()
+        schema = get_database_schema()
+        test_database_connection(engine=engine, attempts=2, delay_seconds=1.0)
+
+        with engine.begin() as connection:
+            emit_init_log("creating metadata tables")
+            create_metadata_tables(connection)
+
+        with engine.connect() as connection:
+            emit_init_log("checking sales table existence")
+            sales_table_exists = inspect(connection).has_table(SALES_TABLE, schema=schema)
+
         if not sales_table_exists:
+            emit_init_log("sales table missing, bootstrapping workbook import")
             source_file = bootstrap_source_file()
             source_token = str(source_file.stat().st_mtime_ns)
             replace_database_contents(source_file, source_file.name, source_token)
@@ -370,20 +394,32 @@ def initialize_database() -> str:
                 timespec="seconds"
             )
         else:
+            emit_init_log("sales table already exists")
             fallback_updated_at = None
 
-        ensure_last_updated_metadata(connection, fallback_updated_at)
+        with engine.begin() as connection:
+            emit_init_log("ensuring last updated metadata")
+            ensure_last_updated_metadata(connection, fallback_updated_at)
+            stored_name = connection.execute(
+                text(f"SELECT value FROM {qualify_table_name(METADATA_TABLE, schema)} WHERE key = :key"),
+                {"key": "source_name"},
+            ).fetchone()
 
-        stored_name = connection.execute(
-            text(f"SELECT value FROM {qualify_table_name(METADATA_TABLE, schema)} WHERE key = :key"),
-            {"key": "source_name"},
-        ).fetchone()
+        emit_init_log("initialize_database finished")
+        source_name = "Banco remoto"
+        if stored_name:
+            source_name = stored_name[0]
+        elif source_file is not None:
+            source_name = source_file.name
 
-    if stored_name:
-        return stored_name[0]
-    if source_file is not None:
-        return source_file.name
-    return "Banco remoto"
+        st.session_state[DB_INIT_STATE_KEY] = "ready"
+        st.session_state[DB_INIT_SOURCE_NAME_KEY] = source_name
+        return source_name
+    except Exception as exc:
+        emit_init_log(f"initialize_database failed: {exc}")
+        st.session_state[DB_INIT_STATE_KEY] = "failed"
+        st.session_state[DB_INIT_ERROR_KEY] = str(exc)
+        raise RuntimeError(f"Falha ao inicializar o banco de dados: {exc}") from exc
 
 
 @st.cache_data
@@ -445,6 +481,22 @@ FILTERS_STATE_KEY = "filtros"
 PERIOD_INPUT_KEY = "filtros.periodo.input"
 TYPE_WIDGET_KEY = "filtros.tipos"
 PRODUCT_WIDGET_KEY = "filtros.produtos"
+DB_INIT_STATE_KEY = "database.initialization.state"
+DB_INIT_SOURCE_NAME_KEY = "database.initialization.source_name"
+DB_INIT_ERROR_KEY = "database.initialization.error"
+DB_INIT_LOGS_KEY = "database.initialization.logs"
+
+
+def emit_init_log(message: str) -> None:
+    log_database_event(message)
+    logs = st.session_state.setdefault(DB_INIT_LOGS_KEY, [])
+    logs.append(message)
+    if len(logs) > 50:
+        del logs[:-50]
+
+
+def get_initialization_logs() -> list[str]:
+    return list(st.session_state.get(DB_INIT_LOGS_KEY, []))
 
 
 def init_session_state() -> None:
