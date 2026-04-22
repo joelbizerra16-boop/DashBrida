@@ -273,7 +273,6 @@ def clear_data_caches() -> None:
     st.session_state.pop(DB_INIT_STATE_KEY, None)
     st.session_state.pop(DB_INIT_SOURCE_NAME_KEY, None)
     st.session_state.pop(DB_INIT_ERROR_KEY, None)
-    st.session_state.pop(DB_INIT_LOGS_KEY, None)
 
 
 def ensure_last_updated_metadata(connection: Connection, fallback_updated_at: str | None = None) -> None:
@@ -484,19 +483,10 @@ PRODUCT_WIDGET_KEY = "filtros.produtos"
 DB_INIT_STATE_KEY = "database.initialization.state"
 DB_INIT_SOURCE_NAME_KEY = "database.initialization.source_name"
 DB_INIT_ERROR_KEY = "database.initialization.error"
-DB_INIT_LOGS_KEY = "database.initialization.logs"
 
 
 def emit_init_log(message: str) -> None:
     log_database_event(message)
-    logs = st.session_state.setdefault(DB_INIT_LOGS_KEY, [])
-    logs.append(message)
-    if len(logs) > 50:
-        del logs[:-50]
-
-
-def get_initialization_logs() -> list[str]:
-    return list(st.session_state.get(DB_INIT_LOGS_KEY, []))
 
 
 def init_session_state() -> None:

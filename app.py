@@ -1,9 +1,13 @@
+import logging
+
 import streamlit as st
 
 from utils.auth import initialize_authentication_state, render_logout_button, require_app_authentication
 from utils.formatters import format_dataframe_ptbr, format_date, format_integer
-from utils.load_data import get_dashboard_context, get_initialization_logs, hide_default_sidebar_navigation, init_session_state, load_sheet_preview
+from utils.load_data import get_dashboard_context, hide_default_sidebar_navigation, init_session_state, load_sheet_preview
 from utils.theme import apply_brand_theme, render_kpi_card, render_page_header, render_section_gap
+
+logger = logging.getLogger("logbrida.app")
 
 st.set_page_config(page_title="Sistema Logistico", layout="wide", initial_sidebar_state="expanded")
 initialize_authentication_state()
@@ -18,11 +22,10 @@ with st.spinner("Inicializando banco de dados..."):
     try:
         df, source_name, sheet_registry = get_dashboard_context()
     except Exception as exc:
-        st.error(f"Falha ao carregar a base: {exc}")
-        logs = get_initialization_logs()
-        if logs:
-            st.code("\n".join(logs), language="text")
-        st.stop()
+        logger.error("Falha ao inicializar banco", exc_info=True)
+        # DEBUG TEMPORARIO: exibe a mensagem real de erro para diagnostico local/cloud.
+        st.error(f"ERRO REAL: {str(exc)}")
+        raise
 
 render_page_header("Sistema Logistico", "Dashboard multi-paginas da BRIDA DISTRIBUIDORA")
 

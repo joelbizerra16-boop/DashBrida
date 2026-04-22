@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import re
 import time
@@ -8,21 +9,21 @@ from typing import Any
 import streamlit as st
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
+from sqlalchemy.engine.url import make_url
 
 IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 DEFAULT_DB_SCHEMA = "public"
+DEFAULT_LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+
+if not logging.getLogger().handlers:
+    logging.basicConfig(
+        level=getattr(logging, DEFAULT_LOG_LEVEL, logging.INFO),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
+logger = logging.getLogger("logbrida.db")
 DEFAULT_CONNECT_TIMEOUT = 5
 DEFAULT_STATEMENT_TIMEOUT_MS = 15000
-
-
-def _get_database_url_from_secrets() -> str | None:
-    try:
-        if "DATABASE_URL" in st.secrets:
-            return str(st.secrets["DATABASE_URL"])
-    except Exception:
-        return None
-
-    return None
 
 
 def _get_secret_value(*keys: str) -> Any | None:
@@ -42,23 +43,25 @@ def _get_secret_value(*keys: str) -> Any | None:
 
 
 def log_database_event(message: str) -> None:
-    print(f"[db] {message}")
+    logger.info(message)
+
+
+def mask_url(url: str) -> str:
+    try:
+        return make_url(url).render_as_string(hide_password=True)
+    except Exception:
+        return "<DATABASE_URL invalido>"
+
+
+def get_database_username(url: str) -> str:
+    try:
+        return make_url(url).username or "<desconhecido>"
+    except Exception:
+        return "<desconhecido>"
 
 
 def build_database_url() -> str:
-    url = None
-
-    if "DATABASE_URL" in st.secrets:
-        url = st.secrets["DATABASE_URL"]
-    elif os.getenv("DATABASE_URL"):
-        url = os.getenv("DATABASE_URL")
-
-    if not url:
-        raise RuntimeError(
-            "DATABASE_URL nao encontrado. Configure em st.secrets ou variavel de ambiente."
-        )
-
-    return str(url).strip()
+    return "postgresql+psycopg://postgres.zkixmtuezifuvmyfcvmv:Supabase%23Joel_2026@aws-1-us-east-2.pooler.supabase.com:6543/postgres?sslmode=require"
 
 
 def get_database_schema() -> str:
@@ -81,15 +84,12 @@ def _build_connect_args() -> dict[str, Any]:
 @st.cache_resource
 def get_engine() -> Engine:
     database_url = build_database_url()
-    log_database_event(f"creating engine for {database_url.split('@')[-1]}")
-    try:
-        st.write("Usando DATABASE_URL do Streamlit Secrets/Environment:", database_url.split("@")[-1])
-    except Exception:
-        pass
+    logger.info("Inicializando conexao com banco")
+    logger.debug("DATABASE_URL carregada com sucesso: %s", mask_url(database_url))
+    logger.info("Usuario do banco: %s", get_database_username(database_url))
     return create_engine(
         database_url,
         pool_pre_ping=True,
-        connect_args=_build_connect_args(),
         future=True,
     )
 
@@ -104,14 +104,14 @@ def test_database_connection(engine: Engine | None = None, attempts: int = 2, de
 
     for attempt in range(1, attempts + 1):
         try:
-            log_database_event(f"connection test attempt {attempt}/{attempts}")
+            logger.info("Teste de conexao com banco %s/%s", attempt, attempts)
             with active_engine.connect() as connection:
                 connection.execute(text("SELECT 1"))
-            log_database_event("connection test succeeded")
+            logger.info("Conexao com banco validada com sucesso")
             return
         except Exception as exc:
             last_error = exc
-            log_database_event(f"connection test failed: {exc}")
+            logger.error("Erro ao conectar ao banco", exc_info=True)
             if attempt < attempts:
                 time.sleep(delay_seconds)
 
